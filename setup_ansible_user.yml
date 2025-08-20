@@ -3,8 +3,8 @@
   hosts: all
   become: yes
   vars:
-    ansible_service_user: testuser
-    ansible_service_user_home: /home/ansible
+    ansible_service_user: ansible 
+    ansible_service_user_home: /home/{{ ansible_service_user }}
     
   tasks:
     - name: Create ansible user
@@ -17,14 +17,14 @@
         system: no
       tags: user_creation
 
- #   - name: Set proper umask for ansible user
- #     lineinfile:
- #       path: "{{ ansible_service_user_home }}/.bashrc"
- #       line: "umask 0022"
- #       create: yes
- #       owner: "{{ ansible_service_user }}"
- #       group: "{{ ansible_service_user }}"
- #     tags: user_creation
+    - name: Set proper umask for ansible user
+      lineinfile:
+        path: "{{ ansible_service_user_home }}/.bashrc"
+        line: "umask 0022"
+        create: yes
+        owner: "{{ ansible_service_user }}"
+        group: "{{ ansible_service_user }}"
+      tags: user_creation
 
     - name: Set password for ansible user (optional - for emergency access)
       user:
