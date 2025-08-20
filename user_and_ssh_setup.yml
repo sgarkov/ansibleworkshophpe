@@ -1,10 +1,9 @@
 ---
-# setup_ansible_user.yml
 - name: Setup Ansible User and Configuration on All Servers
-  hosts: all_servers
+  hosts: all
   become: yes
   vars:
-    ansible_service_user: ansible
+    ansible_service_user: testuser
     ansible_service_user_home: /home/ansible
     
   tasks:
@@ -16,14 +15,21 @@
         home: "{{ ansible_service_user_home }}"
         create_home: yes
         system: no
-        groups: wheel
-        append: yes
       tags: user_creation
+
+ #   - name: Set proper umask for ansible user
+ #     lineinfile:
+ #       path: "{{ ansible_service_user_home }}/.bashrc"
+ #       line: "umask 0022"
+ #       create: yes
+ #       owner: "{{ ansible_service_user }}"
+ #       group: "{{ ansible_service_user }}"
+ #     tags: user_creation
 
     - name: Set password for ansible user (optional - for emergency access)
       user:
         name: "{{ ansible_service_user }}"
-        password: "{{ 'ansible123' | password_hash('sha512') }}"
+        password: "{{ 'password' | password_hash('sha512') }}"
       tags: user_creation
 
     - name: Create .ssh directory for ansible user
@@ -68,11 +74,7 @@
     - name: Configure sudoers for ansible user
       copy:
         content: |
-          # Ansible user sudoers configuration
           {{ ansible_service_user }} ALL=(ALL) NOPASSWD: ALL
-          
-          # Optional: Restrict to specific commands if needed
-          # {{ ansible_service_user }} ALL=(ALL) NOPASSWD: /bin/systemctl, /usr/bin/yum, /usr/bin/dnf
         dest: /etc/sudoers.d/{{ ansible_service_user }}
         owner: root
         group: root
@@ -80,33 +82,11 @@
         validate: 'visudo -cf %s'
       tags: sudo_setup
 
-    - name: Ensure wheel group has sudo access (RHEL default)
-      lineinfile:
-        path: /etc/sudoers
-        regexp: '^%wheel\s'
-        line: '%wheel ALL=(ALL) ALL'
-        validate: 'visudo -cf %s'
+    - name: Verify sudoers file integrity
+      command: visudo -c
+      register: sudoers_check
+      changed_when: false
       tags: sudo_setup
-
-    - name: Configure SSH for better security and performance
-      blockinfile:
-        path: /etc/ssh/sshd_config
-        block: |
-          # Ansible optimizations
-          UseDNS no
-          PubkeyAuthentication yes
-          PasswordAuthentication yes
-          PermitRootLogin yes
-          
-          # Security improvements
-          Protocol 2
-          MaxAuthTries 3
-          ClientAliveInterval 300
-          ClientAliveCountMax 2
-        marker: "# {mark} ANSIBLE MANAGED BLOCK"
-        backup: yes
-      notify: restart sshd
-      tags: ssh_config
 
     - name: Set proper permissions on ansible user home directory
       file:
@@ -115,75 +95,3 @@
         group: "{{ ansible_service_user }}"
         mode: '0755'
       tags: permissions
-
-    - name: Create ansible configuration directory
-      file:
-        path: "{{ ansible_service_user_home }}/.ansible"
-        state: directory
-        owner: "{{ ansible_service_user }}"
-        group: "{{ ansible_service_user }}"
-        mode: '0755'
-      when: inventory_hostname in groups['control']
-      tags: ansible_config
-
-  handlers:
-    - name: restart sshd
-      systemd:
-        name: sshd
-        state: restarted
-
-# Second play to update inventory and test connectivity
-- name: Update Ansible Configuration and Test
-  hosts: control
-  become: yes
-  become_user: ansible
-  vars:
-    ansible_service_user: ansible
-    
-  tasks:
-    - name: Create updated inventory file for ansible user
-      copy:
-        content: |
-          # Updated inventory for ansible user
-          [control]
-          server1 ansible_host={{ hostvars['server1']['ansible_host'] }}
-
-          [managed_nodes]
-          {% for host in groups['managed_nodes'] %}
-          {{ host }} ansible_host={{ hostvars[host]['ansible_host'] }}
-          {% endfor %}
-
-          [all_servers:children]
-          control
-          managed_nodes
-
-          [all_servers:vars]
-          ansible_user={{ ansible_service_user }}
-          ansible_ssh_private_key_file=/home/{{ ansible_service_user }}/.ssh/id_rsa
-          ansible_ssh_common_args='-o StrictHostKeyChecking=no'
-        dest: /home/{{ ansible_service_user }}/inventory.ini
-        owner: "{{ ansible_service_user }}"
-        group: "{{ ansible_service_user }}"
-        mode: '0644'
-      tags: final_config
-
-    - name: Create ansible.cfg for the ansible user
-      copy:
-        content: |
-          [defaults]
-          inventory = /home/{{ ansible_service_user }}/inventory.ini
-          remote_user = {{ ansible_service_user }}
-          private_key_file = /home/{{ ansible_service_user }}/.ssh/id_rsa
-          host_key_checking = False
-          retry_files_enabled = False
-          gathering = smart
-          fact_caching = memory
-          
-          [ssh_connection]
-          ssh_args = -o ControlMaster=auto -o ControlPersist=60s -o StrictHostKeyChecking=no
-          pipelining = True
-        dest: /home/{{ ansible_service_user }}/.ansible.cfg
-        owner: "{{ ansible_service_user }}"
-        group: "{{ ansible_service_user }}"
-        mode: '0644'
-      tags: final_config
