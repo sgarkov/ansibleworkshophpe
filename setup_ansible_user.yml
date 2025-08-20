@@ -1,46 +1,60 @@
 ---
+# setup_ansible_user.yml
+# This playbook creates an ansible service user on all servers and configures
+# passwordless SSH access and sudo privileges for automation tasks
 - name: Setup Ansible User and Configuration on All Servers
   hosts: all
-  become: yes
+  gather_facts: false
+  become: true
   vars:
-    ansible_service_user: ansible 
+    ansible_service_user: ansible
     ansible_service_user_home: /home/{{ ansible_service_user }}
     
   tasks:
+    # Create the ansible user account that will be used for all automation
+    # This user will have its own home directory and bash shell
     - name: Create ansible user
       user:
         name: "{{ ansible_service_user }}"
         state: present
         shell: /bin/bash
         home: "{{ ansible_service_user_home }}"
-        create_home: yes
-        system: no
+        create_home: true
+        system: false                    # Regular user, not system user
       tags: user_creation
 
-    - name: Set proper umask for ansible user
+    # Set a password for emergency console access (optional)
+    # In production, you might want to remove this or use ansible-vault
+    - name: Set password for ansible user (optional - for emergency access)
+      user:
+        name: "{{ ansible_service_user }}"
+        password: "{{ 'ansible123' | password_hash('sha512') }}"
+      tags: user_creation
+
+    # Ensure the user has standard umask (0022) for proper file permissions
+    # This creates files with 644 and directories with 755 permissions
+    - name: Set standard umask for ansible user
       lineinfile:
         path: "{{ ansible_service_user_home }}/.bashrc"
         line: "umask 0022"
-        create: yes
+        create: true
         owner: "{{ ansible_service_user }}"
         group: "{{ ansible_service_user }}"
       tags: user_creation
 
-    - name: Set password for ansible user (optional - for emergency access)
-      user:
-        name: "{{ ansible_service_user }}"
-        password: "{{ 'password' | password_hash('sha512') }}"
-      tags: user_creation
-
+    # Create SSH directory with proper permissions (700) for security
+    # This directory will store SSH keys and configuration
     - name: Create .ssh directory for ansible user
       file:
         path: "{{ ansible_service_user_home }}/.ssh"
         state: directory
         owner: "{{ ansible_service_user }}"
         group: "{{ ansible_service_user }}"
-        mode: '0700'
+        mode: '0700'                  # Only user can read/write/execute
       tags: ssh_setup
 
+    # Generate SSH key pair ONLY on the control node (first server)
+    # This key will be used to authenticate to all other servers
     - name: Generate SSH key pair for ansible user on control node
       openssh_keypair:
         path: "{{ ansible_service_user_home }}/.ssh/id_rsa"
@@ -48,10 +62,12 @@
         size: 4096
         owner: "{{ ansible_service_user }}"
         group: "{{ ansible_service_user }}"
-        mode: '0600'
+        mode: '0600'                  # Private key - only user can read
       when: inventory_hostname in groups['control']
       tags: ssh_setup
 
+    # Read the public key from control node so we can distribute it
+    # slurp module reads file content and base64 encodes it
     - name: Fetch public key from control node
       slurp:
         src: "{{ ansible_service_user_home }}/.ssh/id_rsa.pub"
@@ -59,11 +75,15 @@
       when: inventory_hostname in groups['control']
       tags: ssh_setup
 
+    # Make the public key available to all hosts as a fact
+    # This allows us to use the same key on all servers
     - name: Set public key fact for all hosts
       set_fact:
         ansible_pubkey: "{{ hostvars[groups['control'][0]]['ansible_public_key']['content'] | b64decode }}"
       tags: ssh_setup
 
+    # Add the public key to authorized_keys on ALL servers (including control)
+    # This enables passwordless SSH login from control node to all servers
     - name: Add ansible user public key to authorized_keys on all servers
       authorized_key:
         user: "{{ ansible_service_user }}"
@@ -71,27 +91,41 @@
         state: present
       tags: ssh_setup
 
+    # Grant sudo privileges to ansible user via sudoers.d directory
+    # NOPASSWD allows running sudo commands without entering password
+    # validate parameter ensures syntax is correct before applying
     - name: Configure sudoers for ansible user
       copy:
         content: |
+          # Ansible user sudoers configuration
+          # Allows ansible user to run any command as any user without password
           {{ ansible_service_user }} ALL=(ALL) NOPASSWD: ALL
         dest: /etc/sudoers.d/{{ ansible_service_user }}
         owner: root
         group: root
-        mode: '0440'
-        validate: 'visudo -cf %s'
+        mode: '0440'                  # Read-only for owner and group
+        validate: 'visudo -cf %s'    # Test file syntax before applying
       tags: sudo_setup
 
-    - name: Verify sudoers file integrity
-      command: visudo -c
-      register: sudoers_check
-      changed_when: false
-      tags: sudo_setup
-
+    # Ensure proper ownership of the ansible user's home directory
+    # Sometimes user creation doesn't set ownership correctly
     - name: Set proper permissions on ansible user home directory
       file:
         path: "{{ ansible_service_user_home }}"
         owner: "{{ ansible_service_user }}"
         group: "{{ ansible_service_user }}"
-        mode: '0755'
+        mode: '0755'                  # Standard home directory permissions
       tags: permissions
+
+    # Create ~/.ssh/config file that is used to skip host key cheecking
+    - name: Create ansible.cfg for the ansible user
+      copy:
+        content: |
+          Host *
+              StrictHostKeyChecking no
+        dest: /home/{{ ansible_service_user }}/.ssh/config
+        owner: "{{ ansible_service_user }}"
+        group: "{{ ansible_service_user }}"
+        mode: '0644'
+      when: inventory_hostname in groups['control']
+      tags: final_config
